@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import torch
 
 
-def box_corner_to_center(boxes: torch.tensor)  -> torch.tensor:
+def box_corner_to_center(boxes: torch.tensor) -> torch.tensor:
     """
     将锚框四角坐标转换为中心坐标
     :param boxes: (x1, y1, x2, y2)
@@ -40,7 +40,8 @@ def bbox_to_rect(bbox: torch.tensor, color: str):
                          fill=False, edgecolor=color, linewidth=2)
 
 
-def multi_box_prior(data: torch.tensor, scales: list, ratios: list) -> torch.tensor:
+def multi_box_prior(data: torch.tensor, scales: list,
+                    ratios: list) -> torch.tensor:
     """
     以每个像素为中心生辰不同形状的锚框
     :param data: 图片 (batch_size, channel, width, height)
@@ -209,3 +210,81 @@ def multi_box_target(anchors, labels):
     bbox_mask = torch.stack(batch_mask)
     class_labels = torch.stack(batch_class_labels)
     return (bbox_offset, bbox_mask, class_labels)
+
+
+def offset_inverse(anchors, offset_preds):
+    """
+    根据带有预测偏移量的锚框来预测边界框
+    :param anchors:
+    :param offset_preds:
+    :return:
+    """
+    anc = box_corner_to_center(anchors)
+    pred_box_xy = (offset_preds[:, :2] * anc[:, 2:] / 10) + anc[:, :2]
+    pred_box_wh = torch.exp(offset_preds[:, 2:] / 5) * anc[:, 2:]
+    pred_bbox = torch.cat((pred_box_xy, pred_box_wh), dim=1)
+    predicted_bbox = box_center_to_corner(pred_bbox)
+    return predicted_bbox
+
+
+def nms(boxes, scores, iou_threshold):
+    """
+    对预测边界框的置信度排序
+    :param boxes:
+    :param scores:
+    :param iou_threshold:
+    :return:
+    """
+    b = torch.argsort(scores, dim=-1, descending=True)
+    keep = []
+    while b.numel() > 0:
+        i = b[0]
+        keep.append(i)
+        if b.numel() == 1:
+            break
+        iou = box_iou(boxes[i, :].reshape(-1, 4),
+                      boxes[b[1:], :].reshape(-1, 4)).reshape(-1)
+        inds = torch.nonzero(iou <= iou_threshold).reshape(-1)
+        b = b[inds + 1]
+    return torch.tensor(keep, device=boxes.device)
+
+
+def multi_box_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5,
+                        pos_threshold=0.009999999):
+    """
+    使用非极大值抑制来与预测边界框
+    :param cls_probs:
+    :param offset_preds:
+    :param anchors:
+    :param nms_threshold:
+    :param pos_threshold:
+    :return:
+    """
+    device, batch_size = cls_probs.device, cls_probs.shape[0]
+    anchors = anchors.squeeze(0)
+    num_classes, num_anchors = cls_probs.shape[1], cls_probs.shape[2]
+    out = []
+    for i in range(batch_size):
+        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape(-1, 4)
+        conf, class_id = torch.max(cls_prob[1:], 0)
+        predicted_bb = offset_inverse(anchors, offset_pred)
+        keep = nms(predicted_bb, conf, nms_threshold)
+
+        # 找到所有的non_keep索引，并将类别设置为背景
+        all_idx = torch.arange(num_anchors, dtype=torch.long, device=device)
+        combined = torch.cat((keep, all_idx))
+        uniques, counts = combined.unique(return_counts=True)
+        non_keep = uniques[counts == 1]
+        all_id_sorted = torch.cat((keep, non_keep))
+        class_id[non_keep] = -1
+        class_id = class_id[all_id_sorted]
+        conf, predicted_bb = conf[all_id_sorted], predicted_bb[all_id_sorted]
+        # pos_threshold是一个用于非背景预测的阈值
+        below_min_idx = (conf < pos_threshold)
+        class_id[below_min_idx] = -1
+        conf[below_min_idx] = 1 - conf[below_min_idx]
+        pred_info = torch.cat((class_id.unsqueeze(1),
+                               conf.unsqueeze(1),
+                               predicted_bb), dim=1)
+        out.append(pred_info)
+    return torch.stack(out)
