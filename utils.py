@@ -67,10 +67,9 @@ def multi_box_prior(data: torch.tensor, scales: list,
     shift_y, shift_x = shift_y.reshape(-1), shift_x.reshape(-1)
 
     # 生成"boxes_per_pixel"个高和宽
-    # 之后用于创建锚框的四角坐标(x_min,x_max,y_min,y_max)
+    # 之后用于创建锚框的四角坐标(x_min,y_min,x_max,y_max)
     w = torch.cat((scale_tensor * torch.sqrt(ratio_tensor[0]),
-                   scales[0] * torch.sqrt(ratio_tensor[1:]))) \
-        * in_height / in_width  # 处理矩形输入
+                   scales[0] * torch.sqrt(ratio_tensor[1:])))
     h = torch.cat((scale_tensor / torch.sqrt(ratio_tensor[0]),
                    scales[0] / torch.sqrt(ratio_tensor[1:])))
     anchor_manipulations = torch.stack((-w, -h, w, h)).T.repeat(
@@ -110,7 +109,7 @@ def box_iou(boxes1, boxes2):
     计算交并比
     :param boxes1: (boxes1的数量, 4)
     :param boxes2: (boxes2的数量, 4)
-    :return:
+    :return: 交并比矩阵 (boxes1的数量, boxes2的数量)
     """
     box_area = lambda boxes: ((boxes[:, 2] - boxes[:, 0]) *
                               (boxes[:, 3] - boxes[:, 1]))
@@ -134,39 +133,43 @@ def box_iou(boxes1, boxes2):
 
 def assign_anchor_to_box(ground_truth, anchors, device, iou_threshold=0.5):
     """
-    将最接近的真实边界框分配给锚框
+    将最接近的真实边界框分配给锚框,
     :param ground_truth: 真实边界框
     :param anchors: 锚框
     :param device:
     :param iou_threshold:
-    :return: torch.tensor
+    :return: 锚框对应的真实边界框的索引 (type: torch.tensor, shape: (锚框数量,))
     """
     num_anchors, num_gt_boxes = anchors.shape[0], ground_truth.shape[0]
     # 位于第i行和第j列的元素x_ij是锚框i和真实边界框j的IoU
-    jac_card = box_iou(anchors, ground_truth)
-    # 对于每个锚框，分配真实的边界框张量
+    jaccard = box_iou(anchors, ground_truth)
+    # 对于每个锚框，分配真实的边界框张量（分配真实边界框的索引）
     anchors_bbox_map = torch.full((num_anchors,), -1, dtype=torch.long,
                                   device=device)
     # 根据阈值，决定是否分配真实的边界框
-    max_iou, indices = torch.max(jac_card, dim=1)
-    anc_i = torch.nonzero(max_iou >= iou_threshold).reshape(-1)
+    max_iou, indices = torch.max(jaccard, dim=1)
+    anc_i = torch.nonzero(max_iou >= iou_threshold).reshape(-1)  #
     box_j = indices[max_iou >= iou_threshold]
     anchors_bbox_map[anc_i] = box_j
     colum_discard = torch.full((num_anchors,), -1)
     row_discard = torch.full((num_gt_boxes,), -1)
     for _ in range(num_gt_boxes):
-        max_idx = torch.argmax(jac_card)
+        max_idx = torch.argmax(jaccard)
         box_idx = (max_idx % num_gt_boxes).long()
         anc_idx = (max_idx / num_gt_boxes).long()
         anchors_bbox_map[anc_idx] = box_idx
-        jac_card[:, box_idx] = colum_discard
-        jac_card[anc_idx, :] = row_discard
+        jaccard[:, box_idx] = colum_discard
+        jaccard[anc_idx, :] = row_discard
     return anchors_bbox_map
 
 
 def offset_boxes(anchors, assigned_bb, eps=1e-6):
     """
     对锚框偏移量的转换
+    :param anchors: 锚框
+    :param assigned_bb: 分配边界框
+    :param eps:
+    :return: 偏移量
     """
     c_anc = box_corner_to_center(anchors)
     c_assigned_bb = box_corner_to_center(assigned_bb)
@@ -179,8 +182,8 @@ def offset_boxes(anchors, assigned_bb, eps=1e-6):
 def multi_box_target(anchors, labels):
     """
     使用真实边界框标注锚框
-    :param anchors:
-    :param labels:
+    :param anchors: 锚框
+    :param labels: 真实边界框
     :return:
     """
     batch_size, anchors = labels.shape[0], anchors.squeeze(0)
